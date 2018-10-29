@@ -7,6 +7,7 @@ const { countVictims } = require('./lib/counter');
 const { httpRequest } = require('./lib/request');
 
 const CHECK_STRAY_BULLETS = 250;
+const RPS_UPDATE = 1000;
 
 function getResourcePaths(data) {
   const lines = data.split('\n');
@@ -49,18 +50,19 @@ function wait(strayBullets) {
   });
 }
 
-function showReport(warGround, strayBullets, requests) {
+function showReport(warGround, strayBullets, requests, actualRps) {
   console.log('\nWar Journal:');
   console.log({
     durationInSec: parseInt((Date.now() - process.env.START_TIME) / 1000, 10),
     ammunitionLeft: requests.length,
     fired: warGround.length,
     strayBullets: strayBullets.number,
+    actualRps,
   });
 }
 
-function endWar(warGround, rps, reportPath) {
-  const report = countVictims(warGround, rps, reportPath);
+function endWar(warGround, strategy) {
+  const report = countVictims(warGround, strategy);
   console.log('\nWar Report:');
   console.log(report);
   process.exit();
@@ -72,27 +74,40 @@ async function startWar(strategy) {
     number: 0,
   };
 
+  let rps = _.clone(strategy.requestPerSecond);
+
+  // Dynamic RPS
+  let updateRPS;
+  if (strategy.raiseTo) {
+    const raiseTo = strategy.raiseTo ? strategy.raiseTo : 0;
+    const m = Number(((raiseTo - rps) / (strategy.duration - 1)).toFixed(2));
+    updateRPS = setInterval(() => {
+      rps = Number((rps + (m * (RPS_UPDATE / 1000))).toFixed(2));
+    }, RPS_UPDATE);
+  }
+
   // if no pathsFrom provided load infinity default request
   const requests = await loadAmmunition(strategy.request.default, strategy.request.pathsFrom);
 
   process.env.START_TIME = Date.now();
 
   const journal = setInterval(() => {
-    showReport(warGround, strayBullets, requests);
+    showReport(warGround, strayBullets, requests, rps);
   }, strategy.reportFrequency * 1000);
 
-  const firing = setInterval(async () => {
+  let takeAim;
+  const firing = async () => {
     const bullet = requests.pop();
 
     // OUT OF AMMO
     if (!bullet) {
-      clearInterval(firing);
       console.log('\nFire ceased - out of ammo');
+      clearInterval(updateRPS);
       process.env.STOP_FIRE_TIME = Date.now();
       await wait(strayBullets);
       process.env.END_TIME = Date.now();
       clearInterval(journal);
-      endWar(warGround, strategy.requestPerSecond, strategy.reportPath);
+      endWar(warGround, strategy);
     }
 
     strayBullets.number += 1;
@@ -102,28 +117,33 @@ async function startWar(strategy) {
         warGround.push(victim);
         strayBullets.number -= 1;
       });
-  }, (1 / strategy.requestPerSecond) * 1000);
+
+    takeAim = setTimeout(firing, (1 / rps) * 1000);
+  };
+  firing();
 
   // DEADLINE
   setTimeout(async () => {
-    clearInterval(firing);
+    clearTimeout(takeAim);
+    clearInterval(updateRPS);
     console.log('\nFire ceased - temporal deadline');
     process.env.STOP_FIRE_TIME = Date.now();
     await wait(strayBullets);
     process.env.END_TIME = Date.now();
     clearInterval(journal);
-    endWar(warGround, strategy.requestPerSecond, strategy.reportPath);
+    endWar(warGround, strategy);
   }, strategy.duration * 1000);
 
   // MANUAL STOP
   process.on('SIGINT', async () => {
-    clearInterval(firing);
+    clearTimeout(takeAim);
+    clearInterval(updateRPS);
     console.log('\nFire ceased - manual stop');
     process.env.STOP_FIRE_TIME = Date.now();
     await wait(strayBullets);
     process.env.END_TIME = Date.now();
     clearInterval(journal);
-    endWar(warGround, strategy.requestPerSecond, strategy.reportPath);
+    endWar(warGround, strategy);
   });
 }
 
