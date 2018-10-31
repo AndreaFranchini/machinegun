@@ -7,7 +7,8 @@ const { countVictims } = require('./lib/counter');
 const { httpRequest } = require('./lib/request');
 
 const CHECK_STRAY_BULLETS = 250;
-const RPS_UPDATE = 1000;
+const CHECK_STRAY_DEADLINE = 15000;
+const RPS_UPDATE = 500; // better if less than 1000
 
 function getResourcePaths(data) {
   const lines = data.split('\n');
@@ -21,7 +22,17 @@ function getResourcePaths(data) {
 
 async function fire(request, asBrowser) {
   const start = Date.now();
-  const response = await httpRequest(request);
+  let response;
+  try {
+    response = await httpRequest(request);
+  } catch (err) {
+    console.log('httpRequest error');
+    console.log(err);
+    return {
+      status: 500,
+      data: err.message,
+    }
+  }
 
   if (asBrowser) {
     const paths = getResourcePaths(response.data);
@@ -33,7 +44,10 @@ async function fire(request, asBrowser) {
     await Promise.all(resourceRequests);
   }
 
-  delete response.data;
+  if (response.status.toString()[0] === '2') {
+    delete response.data;
+  }
+  
   response.latency = Date.now() - start;
   response.time = start;
 
@@ -47,6 +61,7 @@ function wait(strayBullets) {
         resolve();
       }
     }, CHECK_STRAY_BULLETS);
+    setTimeout(() => resolve(), CHECK_STRAY_DEADLINE);
   });
 }
 
@@ -61,8 +76,8 @@ function showReport(warGround, strayBullets, requests, actualRps) {
   });
 }
 
-function endWar(warGround, strategy) {
-  const report = countVictims(warGround, strategy);
+function endWar(warGround, strategy, rpsHistory) {
+  const report = countVictims(warGround, strategy, rpsHistory);
   console.log('\nWar Report:');
   console.log(report);
   process.exit();
@@ -77,12 +92,20 @@ async function startWar(strategy) {
   let rps = _.clone(strategy.requestPerSecond);
 
   // Dynamic RPS
+  let rpsHistory = [{
+    time: Date.now(),
+    rps,
+  }];
   let updateRPS;
   if (strategy.raiseTo) {
     const raiseTo = strategy.raiseTo ? strategy.raiseTo : 0;
     const m = Number(((raiseTo - rps) / (strategy.duration - 1)).toFixed(2));
     updateRPS = setInterval(() => {
       rps = Number((rps + (m * (RPS_UPDATE / 1000))).toFixed(2));
+      rpsHistory.push({
+        time: Date.now(),
+        rps,
+      });
     }, RPS_UPDATE);
   }
 
@@ -107,7 +130,7 @@ async function startWar(strategy) {
       await wait(strayBullets);
       process.env.END_TIME = Date.now();
       clearInterval(journal);
-      endWar(warGround, strategy);
+      endWar(warGround, strategy, rpsHistory);
     }
 
     strayBullets.number += 1;
@@ -131,7 +154,7 @@ async function startWar(strategy) {
     await wait(strayBullets);
     process.env.END_TIME = Date.now();
     clearInterval(journal);
-    endWar(warGround, strategy);
+    endWar(warGround, strategy, rpsHistory);
   }, strategy.duration * 1000);
 
   // MANUAL STOP
@@ -143,7 +166,7 @@ async function startWar(strategy) {
     await wait(strayBullets);
     process.env.END_TIME = Date.now();
     clearInterval(journal);
-    endWar(warGround, strategy);
+    endWar(warGround, strategy, rpsHistory);
   });
 }
 
